@@ -412,3 +412,71 @@ def export_pdf(version_id):
     p.save()
     output.seek(0)
     return send_file(output, as_attachment=True, download_name=f"timetable_{version_id}.pdf")
+
+
+@timetable_bp.get("/substitutes/needed")
+@role_required("admin")
+def substitutes_needed():
+    active = TimetableVersion.query.filter_by(is_active=True).first()
+    if not active:
+        return jsonify([])
+
+    # Find all entries where the assigned teacher is marked unavailable for that slot
+    entries = TimetableEntry.query.filter_by(version_id=active.id).all()
+    unavailabilities = TeacherAvailability.query.filter_by(is_available=False).all()
+    unavailable_set = {(u.teacher_id, u.time_slot_id) for u in unavailabilities}
+
+    needed = []
+    teachers = {t.id: t for t in Teacher.query.all()}
+    classes = {c.id: c for c in ClassGroup.query.all()}
+    subjects = {s.id: s for s in Subject.query.all()}
+    slots = {s.id: s for s in TimeSlot.query.all()}
+
+    # Calculate free teachers for each slot
+    all_teachers = set(teachers.keys())
+    slot_to_busy_teachers = defaultdict(set)
+    for e in entries:
+        slot_to_busy_teachers[e.time_slot_id].add(e.teacher_id)
+        
+    for u in unavailabilities:
+        slot_to_busy_teachers[u.time_slot_id].add(u.teacher_id)
+
+    for e in entries:
+        if (e.teacher_id, e.time_slot_id) in unavailable_set:
+            absent_teacher = teachers.get(e.teacher_id)
+            cls = classes.get(e.class_id)
+            subj = subjects.get(e.subject_id)
+            slot = slots.get(e.time_slot_id)
+
+            available_teacher_ids = all_teachers - slot_to_busy_teachers[e.time_slot_id]
+            available_teachers_list = [{"id": tid, "name": teachers[tid].name} for tid in available_teacher_ids]
+
+            needed.append({
+                "entry_id": e.id,
+                "absent_teacher_id": e.teacher_id,
+                "absent_teacher_name": absent_teacher.name if absent_teacher else "Unknown",
+                "class_name": cls.name if cls else "Unknown",
+                "subject_name": subj.name if subj else "Unknown",
+                "day": slot.day_of_week if slot else "Unknown",
+                "time": f"{slot.start_time.strftime('%H:%M')}-{slot.end_time.strftime('%H:%M')}" if slot else "Unknown",
+                "available_substitutes": available_teachers_list
+            })
+
+    return jsonify(needed)
+
+
+@timetable_bp.post("/substitutes/assign")
+@role_required("admin")
+def assign_substitute():
+    data = request.get_json() or {}
+    entry_id = data.get("entry_id")
+    new_teacher_id = data.get("substitute_teacher_id")
+
+    if not entry_id or not new_teacher_id:
+        return jsonify({"error": "entry_id and substitute_teacher_id are required"}), 400
+
+    entry = TimetableEntry.query.get_or_404(entry_id)
+    entry.teacher_id = new_teacher_id
+    db.session.commit()
+
+    return jsonify({"message": "Substitute assigned successfully"})
