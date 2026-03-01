@@ -96,7 +96,7 @@ def _import_teachers(rows):
 def _import_rooms(rows):
     created = 0
     for row in rows:
-        name = str(row.get("name", "")).strip()
+        name = str(row.get("name") or row.get("room_name") or "").strip()
         if not name:
             continue
         capacity = int(row.get("capacity", 0) or 0)
