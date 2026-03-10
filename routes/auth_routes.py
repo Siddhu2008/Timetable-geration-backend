@@ -26,15 +26,28 @@ def seed_admin():
         admin.role = "admin"
         admin.teacher_id = None
         admin.class_id = None
-        admin.set_password("adimn")
+        admin.set_password("admin")
         db.session.commit()
-        return jsonify({"message": "Admin credentials reset", "username": "admin", "password": "adimn"}), 200
+        
+        # Ensure at least one class exists for registration dropdown
+        if not ClassGroup.query.first():
+            default_class = ClassGroup(name="Alpha", department="General")
+            db.session.add(default_class)
+            db.session.commit()
+
+        return jsonify({"message": "Admin credentials reset", "username": "admin", "password": "admin"}), 200
 
     admin = User(username="admin", role="admin")
-    admin.set_password("adimn")
+    admin.set_password("admin")
     db.session.add(admin)
+    
+    # Ensure at least one class exists for registration dropdown
+    if not ClassGroup.query.first():
+        default_class = ClassGroup(name="Alpha", department="General")
+        db.session.add(default_class)
+        
     db.session.commit()
-    return jsonify({"message": "Admin created", "username": "admin", "password": "adimn"}), 201
+    return jsonify({"message": "Admin created", "username": "admin", "password": "admin"}), 201
 
 
 @auth_bp.post("/login")
@@ -62,6 +75,7 @@ def login():
 def register():
     data = request.get_json() or {}
     username = data.get("username", "").strip()
+    email = data.get("email", "").strip()
     password = data.get("password", "")
     role = data.get("role", "student")
 
@@ -71,6 +85,9 @@ def register():
         return jsonify({"error": "Username required and password must be at least 6 characters"}), 400
     if User.query.filter_by(username=username).first():
         return jsonify({"error": "Username already exists"}), 409
+    
+    if email and User.query.filter_by(email=email).first():
+        return jsonify({"error": "Email already exists"}), 409
 
     teacher_id = data.get("teacher_id")
     class_id = data.get("class_id")
@@ -95,7 +112,7 @@ def register():
             return jsonify({"error": "Class not found"}), 404
         teacher_id = None
 
-    user = User(username=username, role=role, teacher_id=teacher_id, class_id=class_id)
+    user = User(username=username, email=email, role=role, teacher_id=teacher_id, class_id=class_id)
     user.set_password(password)
     db.session.add(user)
     db.session.commit()
