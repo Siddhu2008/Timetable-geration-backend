@@ -157,12 +157,17 @@ def _import_users(rows):
     classes_by_name = {c.name.lower(): c.id for c in ClassGroup.query.all()}
     for row in rows:
         username = str(row.get("username", "")).strip()
+        email = str(row.get("email", "")).strip()
         password = str(row.get("password", "")).strip()
         role = str(row.get("role", "")).strip().lower()
         if not username or not password or role not in ["admin", "teacher", "student"]:
             continue
         if User.query.filter_by(username=username).first():
             continue
+        
+        if email and User.query.filter_by(email=email).first():
+            continue
+
         teacher_id = row.get("teacher_id")
         class_id = row.get("class_id")
         if not teacher_id and row.get("teacher_name"):
@@ -171,6 +176,7 @@ def _import_users(rows):
             class_id = classes_by_name.get(str(row.get("class_name")).strip().lower())
         user = User(
             username=username,
+            email=email,
             role=role,
             teacher_id=int(teacher_id) if teacher_id else None,
             class_id=int(class_id) if class_id else None,
@@ -225,7 +231,10 @@ def get_teachers():
 @role_required("admin")
 def create_teacher():
     data = request.get_json() or {}
-    t = Teacher(name=data["name"], max_lectures_per_day=data.get("max_lectures_per_day", 6))
+    name = str(data.get("name", "")).strip()
+    if not name:
+        return jsonify({"error": "Teacher name cannot be empty"}), 400
+    t = Teacher(name=name, max_lectures_per_day=data.get("max_lectures_per_day", 6))
     db.session.add(t)
     _log_action(f"Created teacher {data['name']}")
     db.session.commit()
@@ -237,7 +246,10 @@ def create_teacher():
 def update_teacher(teacher_id):
     t = Teacher.query.get_or_404(teacher_id)
     data = request.get_json() or {}
-    t.name = data.get("name", t.name)
+    name = str(data.get("name", t.name)).strip()
+    if not name:
+        return jsonify({"error": "Teacher name cannot be empty"}), 400
+    t.name = name
     t.max_lectures_per_day = data.get("max_lectures_per_day", t.max_lectures_per_day)
     _log_action(f"Updated teacher {teacher_id}")
     db.session.commit()
@@ -254,17 +266,17 @@ def delete_teacher(teacher_id):
     return jsonify({"message": "Deleted"})
 
 
-@data_bp.post("/teachers/<int:teacher_id>/subjects")
+
+@data_bp.put("/teachers/<int:teacher_id>/subjects")
 @role_required("admin")
-def map_teacher_subject(teacher_id):
+def sync_teacher_subjects(teacher_id):
     data = request.get_json() or {}
-    exists = TeacherSubject.query.filter_by(teacher_id=teacher_id, subject_id=data["subject_id"]).first()
-    if exists:
-        return jsonify({"message": "Mapping already exists", "id": exists.id, "teacher_id": exists.teacher_id, "subject_id": exists.subject_id}), 200
-    rel = TeacherSubject(teacher_id=teacher_id, subject_id=data["subject_id"])
-    db.session.add(rel)
+    subject_ids = data.get("subject_ids", [])
+    TeacherSubject.query.filter_by(teacher_id=teacher_id).delete()
+    for sid in subject_ids:
+        db.session.add(TeacherSubject(teacher_id=teacher_id, subject_id=sid))
     db.session.commit()
-    return jsonify({"id": rel.id, "teacher_id": rel.teacher_id, "subject_id": rel.subject_id}), 201
+    return jsonify({"message": "Subjects synchronized"})
 
 
 @data_bp.get("/teacher-subjects")
@@ -284,8 +296,12 @@ def get_subjects():
 @role_required("admin")
 def create_subject():
     data = request.get_json() or {}
+    name = str(data.get("name", "")).strip()
+    if not name:
+        return jsonify({"error": "Subject name cannot be empty"}), 400
+
     s = Subject(
-        name=data["name"],
+        name=name,
         class_id=data["class_id"],
         lectures_per_week=data["lectures_per_week"],
         priority_morning=data.get("priority_morning", False),
@@ -302,7 +318,11 @@ def create_subject():
 def update_subject(subject_id):
     s = Subject.query.get_or_404(subject_id)
     data = request.get_json() or {}
-    s.name = data.get("name", s.name)
+    name = str(data.get("name", s.name)).strip()
+    if not name:
+        return jsonify({"error": "Subject name cannot be empty"}), 400
+
+    s.name = name
     s.class_id = data.get("class_id", s.class_id)
     s.lectures_per_week = data.get("lectures_per_week", s.lectures_per_week)
     s.priority_morning = data.get("priority_morning", s.priority_morning)
@@ -660,7 +680,7 @@ def bulk_template(target):
         "rooms": "name,capacity,room_type\nA101,60,classroom\nLab-1,40,lab\n",
         "classes": "name,department,student_strength\nBSc-CS-1,Computer Science,55\nMBA-1,Management,48\n",
         "subjects": "name,class_name,lectures_per_week,priority_morning,is_lab\nMathematics,BSc-CS-1,4,true,false\nDBMS Lab,BSc-CS-1,2,false,true\n",
-        "users": "username,password,role,teacher_name,class_name\nteacher_john,secret123,teacher,John Doe,\nstudent_001,secret123,student,,BSc-CS-1\n",
+        "users": "username,email,password,role,teacher_name,class_name\nteacher_john,john@academy.edu,secret123,teacher,John Doe,\nstudent_001,student1@academy.edu,secret123,student,,BSc-CS-1\n",
     }
     if target not in templates:
         return jsonify({"error": "Invalid target"}), 400

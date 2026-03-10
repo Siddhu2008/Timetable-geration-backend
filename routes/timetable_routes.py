@@ -363,7 +363,7 @@ def export_report_pdf(version_id):
         y -= 18
         p.setFont("Helvetica", 9)
         if isinstance(data, dict):
-            for k, v in list(data.items())[:14]:
+            for k, v in list(data.items()):
                 p.drawString(50, y, f"{k}: {v}")
                 y -= 14
                 if y < 60:
@@ -403,7 +403,7 @@ def export_pdf(version_id):
     p.setFont("Helvetica", 11)
     p.drawString(30, 570, f"Timetable Version {version_id}")
     y = 540
-    for r in rows[:24]:
+    for r in rows:
         p.drawString(30, y, f"Class {r.class_id} | Subject {r.subject_id} | Teacher {r.teacher_id} | Room {r.room_id} | Slot {r.time_slot_id}")
         y -= 20
         if y < 40:

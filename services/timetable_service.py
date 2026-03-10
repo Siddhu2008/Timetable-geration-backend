@@ -65,6 +65,11 @@ def detect_conflicts(version_id: int) -> List[dict]:
         if teacher_daily_count[teacher_day] > max_daily:
             conflicts.append({"type": "teacher_overload", "message": f"Teacher {e.teacher_id} overloaded on {teacher_day[1]}"})
 
+        # Check teacher availability
+        avail = TeacherAvailability.query.filter_by(teacher_id=e.teacher_id, time_slot_id=e.time_slot_id).first()
+        if avail and not avail.is_available:
+            conflicts.append({"type": "teacher_unavailable", "message": f"Teacher {e.teacher_id} is marked unavailable for slot {e.time_slot_id}"})
+
         seen_teacher.add(key_teacher)
         seen_room.add(key_room)
         seen_class.add(key_class)
@@ -164,6 +169,7 @@ def generate_timetable(created_by: int, num_versions: int = 3, max_retries: int 
             
         teacher_busy = set()
         room_busy = set()
+        availability = _load_availability()
         
         def place_item(item_idx):
             if item_idx == len(class_items):
@@ -188,7 +194,7 @@ def generate_timetable(created_by: int, num_versions: int = 3, max_retries: int 
                 t_conflict = False
                 for s_idx in block["slots"]:
                     ts_id = slot_map.get((day, s_idx))
-                    if not ts_id or (teacher_id, ts_id) in teacher_busy:
+                    if not ts_id or (teacher_id, ts_id) in teacher_busy or not availability[(teacher_id, ts_id)]:
                         t_conflict = True
                         break
                 if t_conflict:
@@ -244,16 +250,17 @@ def generate_timetable(created_by: int, num_versions: int = 3, max_retries: int 
                 block = eb["block"]
                 item = block["item"]
                 
-                for s_idx in block["slots"]:
-                    ts_id = slot_map[(day, s_idx)]
-                    db.session.add(TimetableEntry(
-                        version_id=version.id,
-                        class_id=c_id,
-                        subject_id=item["subject_id"],
-                        teacher_id=item["teacher_id"],
-                        room_id=item["room_id"],
-                        time_slot_id=ts_id
-                    ))
+                if item:
+                    for s_idx in block["slots"]:
+                        ts_id = slot_map[(day, s_idx)]
+                        db.session.add(TimetableEntry(
+                            version_id=version.id,
+                            class_id=c_id,
+                            subject_id=item["subject_id"],
+                            teacher_id=item["teacher_id"],
+                            room_id=item["room_id"],
+                            time_slot_id=ts_id
+                        ))
             
             db.session.add(ConflictLog(version_id=version.id, conflict_type="Success", message="Contiguous Generation Successful"))
             version.score = 100.0
