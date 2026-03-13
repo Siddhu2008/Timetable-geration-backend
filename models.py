@@ -39,10 +39,24 @@ class Subject(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False)
-    class_id = db.Column(db.Integer, db.ForeignKey("classes.id"), nullable=False)
+    class_id = db.Column(db.Integer, db.ForeignKey("classes.id"), nullable=True)  # kept for backward compat, nullable now
     lectures_per_week = db.Column(db.Integer, nullable=False)
     priority_morning = db.Column(db.Boolean, default=False)
     is_lab = db.Column(db.Boolean, default=False)
+
+    # Many-to-many: a subject can belong to multiple classes
+    class_groups = db.relationship("ClassGroup", secondary="subject_classes", backref=db.backref("linked_subjects", lazy=True), lazy=True, overlaps="class_group,subjects")
+
+
+class SubjectClass(db.Model):
+    """Many-to-Many junction table: which classes a subject is taught in."""
+    __tablename__ = "subject_classes"
+
+    id = db.Column(db.Integer, primary_key=True)
+    subject_id = db.Column(db.Integer, db.ForeignKey("subjects.id"), nullable=False)
+    class_id = db.Column(db.Integer, db.ForeignKey("classes.id"), nullable=False)
+
+    __table_args__ = (db.UniqueConstraint("subject_id", "class_id", name="uq_subject_class"),)
 
 
 class Room(db.Model):

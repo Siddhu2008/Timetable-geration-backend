@@ -22,6 +22,7 @@ from models import (
     User,
 )
 from services.timetable_service import detect_conflicts, generate_timetable
+from services.generator_engine import TimetableGenerator
 from utils.auth import role_required
 
 timetable_bp = Blueprint("timetable", __name__, url_prefix="/api/timetable")
@@ -95,6 +96,30 @@ def _suggest_alternate_slots(version_id: int, entry: TimetableEntry, limit: int 
         if len(suggestions) >= limit:
             break
     return suggestions
+
+
+@timetable_bp.post("/generate-intelligent")
+@role_required("admin")
+def generate_intelligent():
+    verify_jwt_in_request()
+    data = request.get_json() or {}
+    
+    generator = TimetableGenerator(
+        version_name=data.get("name", "Intelligent Version"),
+        created_by=int(get_jwt_identity())
+    )
+    
+    version = generator.generate()
+    
+    if not version:
+        return jsonify({"error": "Generation failed. Constraints might be too strict."}), 400
+        
+    return jsonify({
+        "id": version.id,
+        "name": version.name,
+        "score": version.score,
+        "is_active": version.is_active
+    }), 201
 
 
 @timetable_bp.post("/generate")

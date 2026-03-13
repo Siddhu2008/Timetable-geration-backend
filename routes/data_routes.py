@@ -17,6 +17,7 @@ from models import (
     Room,
     StudentStrength,
     Subject,
+    SubjectClass,
     Teacher,
     TeacherAvailability,
     TeacherSubject,
@@ -45,10 +46,18 @@ def _to_bool(value, default=False):
 
 def _read_rows_from_upload(file_storage):
     filename = (file_storage.filename or "").lower()
+    
+    def normalize_key(k):
+        return str(k).strip().lower().replace(" ", "_") if k else ""
+
     if filename.endswith(".csv"):
         text = file_storage.read().decode("utf-8-sig")
         reader = csv.DictReader(io.StringIO(text))
-        return [dict(row) for row in reader]
+        out = []
+        for row in reader:
+            normalized_row = {normalize_key(k): v for k, v in row.items()}
+            out.append(normalized_row)
+        return out
 
     if filename.endswith(".xlsx"):
         wb = load_workbook(file_storage, read_only=True)
@@ -56,7 +65,7 @@ def _read_rows_from_upload(file_storage):
         rows = list(ws.iter_rows(values_only=True))
         if not rows:
             return []
-        headers = [str(h).strip() if h is not None else "" for h in rows[0]]
+        headers = [normalize_key(h) for h in rows[0]]
         out = []
         for row in rows[1:]:
             out.append({headers[i]: row[i] if i < len(row) else None for i in range(len(headers))})
@@ -83,25 +92,43 @@ def _read_rows_from_upload(file_storage):
 
 def _import_teachers(rows):
     created = 0
+    existing = {t.name.strip().lower() for t in Teacher.query.all()}
     for row in rows:
-        name = str(row.get("name", "")).strip()
+        name = str(row.get("name") or row.get("teacher_name") or "").strip()
         if not name:
             continue
-        max_per_day = int(row.get("max_lectures_per_day", 6) or 6)
+        if name.lower() in existing:
+            continue
+        
+        try:
+            max_per_day = int(float(row.get("max_lectures_per_day", 6) or 6))
+        except ValueError:
+            max_per_day = 6
+
         db.session.add(Teacher(name=name, max_lectures_per_day=max_per_day))
+        existing.add(name.lower())
         created += 1
     return created
 
 
 def _import_rooms(rows):
     created = 0
+    existing = {r.name.strip().lower() for r in Room.query.all()}
     for row in rows:
         name = str(row.get("name") or row.get("room_name") or "").strip()
         if not name:
             continue
-        capacity = int(row.get("capacity", 0) or 0)
+        if name.lower() in existing:
+            continue
+            
+        try:
+            capacity = int(float(row.get("capacity", 0) or 0))
+        except ValueError:
+            capacity = 0
+            
         room_type = str(row.get("room_type", "classroom") or "classroom").strip().lower()
         db.session.add(Room(name=name, capacity=capacity, room_type=room_type))
+        existing.add(name.lower())
         created += 1
     return created
 
@@ -128,26 +155,83 @@ def _import_classes(rows):
 
 def _import_subjects(rows):
     created = 0
-    classes_by_name = {c.name.lower(): c.id for c in ClassGroup.query.all()}
+    classes_by_name = {c.name.lower(): c for c in ClassGroup.query.all()}
+    dept_classes = {}  # department_lower -> list of ClassGroup
+    for c in ClassGroup.query.all():
+        dept_classes.setdefault(c.department.lower(), []).append(c)
+
+    # Get existing subjects by (name_lower, class_id) to avoid duplicates
+    existing_links = set()
+    for sc in SubjectClass.query.all():
+        subj = Subject.query.get(sc.subject_id)
+        if subj:
+            existing_links.add((subj.name.strip().lower(), sc.class_id))
+
     for row in rows:
         name = str(row.get("name", "")).strip()
         if not name:
             continue
-        class_id = row.get("class_id")
-        if not class_id:
-            class_name = str(row.get("class_name", "")).strip().lower()
-            class_id = classes_by_name.get(class_name)
-        if not class_id:
-            continue
-        item = Subject(
-            name=name,
-            class_id=int(class_id),
-            lectures_per_week=int(row.get("lectures_per_week", 1) or 1),
-            priority_morning=_to_bool(row.get("priority_morning"), False),
-            is_lab=_to_bool(row.get("is_lab"), False),
-        )
-        db.session.add(item)
-        created += 1
+
+        try:
+            lectures_per_week = int(float(row.get("lectures_per_week", 1) or 1))
+        except (ValueError, TypeError):
+            lectures_per_week = 1
+
+        priority_morning = _to_bool(row.get("priority_morning"), False)
+        is_lab = _to_bool(row.get("is_lab"), False)
+
+        # Determine target class list
+        target_classes = []
+        department = str(row.get("department", "")).strip().lower()
+        class_id_raw = row.get("class_id")
+        class_name_raw = str(row.get("class_name", "")).strip().lower()
+
+        if department and department in dept_classes:
+            # Expand to all classes in this department
+            target_classes = dept_classes[department]
+        elif class_id_raw:
+            c = ClassGroup.query.get(int(class_id_raw))
+            if c:
+                target_classes = [c]
+        elif class_name_raw and class_name_raw in classes_by_name:
+            c = classes_by_name[class_name_raw]
+            target_classes = [c]
+            # Also expand to same-department classes
+            dept_key = c.department.lower()
+            if dept_key in dept_classes:
+                target_classes = dept_classes[dept_key]
+
+        if not target_classes:
+            continue  # No valid class target found, skip row
+
+        # Check if a subject with this name already exists (to reuse it)
+        existing_subject = Subject.query.filter(db.func.lower(Subject.name) == name.lower()).first()
+        if existing_subject:
+            subj = existing_subject
+        else:
+            # Create the subject once
+            subj = Subject(
+                name=name,
+                class_id=target_classes[0].id,  # primary class for backward compat
+                lectures_per_week=lectures_per_week,
+                priority_morning=priority_morning,
+                is_lab=is_lab,
+            )
+            db.session.add(subj)
+            db.session.flush()
+
+        # Link to all target classes via SubjectClass junction
+        for c in target_classes:
+            if (subj.name.strip().lower(), c.id) not in existing_links:
+                try:
+                    sc = SubjectClass(subject_id=subj.id, class_id=c.id)
+                    db.session.add(sc)
+                    db.session.flush()
+                    existing_links.add((subj.name.strip().lower(), c.id))
+                    created += 1
+                except Exception:
+                    db.session.rollback()
+
     return created
 
 
@@ -192,10 +276,13 @@ def _teacher_dict(t: Teacher):
 
 
 def _subject_dict(s: Subject):
+    from models import SubjectClass
+    class_ids = [sc.class_id for sc in SubjectClass.query.filter_by(subject_id=s.id).all()]
     return {
         "id": s.id,
         "name": s.name,
-        "class_id": s.class_id,
+        "class_id": s.class_id,  # primary/legacy
+        "class_ids": class_ids,  # all linked classes
         "lectures_per_week": s.lectures_per_week,
         "priority_morning": s.priority_morning,
         "is_lab": s.is_lab,
@@ -300,15 +387,25 @@ def create_subject():
     if not name:
         return jsonify({"error": "Subject name cannot be empty"}), 400
 
+    class_ids = data.get("class_ids") or ([data["class_id"]] if data.get("class_id") else [])
+    if not class_ids:
+        return jsonify({"error": "At least one class is required"}), 400
+
     s = Subject(
         name=name,
-        class_id=data["class_id"],
+        class_id=int(class_ids[0]),
         lectures_per_week=data["lectures_per_week"],
         priority_morning=data.get("priority_morning", False),
         is_lab=data.get("is_lab", False),
     )
     db.session.add(s)
-    _log_action(f"Created subject {data['name']}")
+    db.session.flush()
+
+    # Link to all specified classes
+    for cid in class_ids:
+        db.session.add(SubjectClass(subject_id=s.id, class_id=int(cid)))
+
+    _log_action(f"Created subject {name}")
     db.session.commit()
     return jsonify(_subject_dict(s)), 201
 
@@ -323,10 +420,21 @@ def update_subject(subject_id):
         return jsonify({"error": "Subject name cannot be empty"}), 400
 
     s.name = name
-    s.class_id = data.get("class_id", s.class_id)
     s.lectures_per_week = data.get("lectures_per_week", s.lectures_per_week)
     s.priority_morning = data.get("priority_morning", s.priority_morning)
     s.is_lab = data.get("is_lab", s.is_lab)
+
+    # Update class_ids if provided
+    class_ids = data.get("class_ids")
+    if class_ids is not None and class_ids:
+        s.class_id = int(class_ids[0])  # update primary class
+        # Sync junction table
+        SubjectClass.query.filter_by(subject_id=s.id).delete()
+        for cid in class_ids:
+            db.session.add(SubjectClass(subject_id=s.id, class_id=int(cid)))
+    elif data.get("class_id"):
+        s.class_id = data.get("class_id")
+
     _log_action(f"Updated subject {subject_id}")
     db.session.commit()
     return jsonify(_subject_dict(s))
@@ -336,6 +444,8 @@ def update_subject(subject_id):
 @role_required("admin")
 def delete_subject(subject_id):
     s = Subject.query.get_or_404(subject_id)
+    # Remove junction links first
+    SubjectClass.query.filter_by(subject_id=subject_id).delete()
     db.session.delete(s)
     _log_action(f"Deleted subject {subject_id}")
     db.session.commit()
@@ -644,11 +754,13 @@ def bulk_upload():
         rows = _read_rows_from_upload(uploaded)
     except ValueError as ex:
         return jsonify({"error": str(ex)}), 400
-    except Exception:
-        return jsonify({"error": "Unable to read uploaded file"}), 400
+    except Exception as ex:
+        return jsonify({"error": f"Unable to read uploaded file: {str(ex)}"}), 400
 
     if not rows:
         return jsonify({"error": "No rows found in file"}), 400
+
+    print(f"[BULK] target={target}, rows={len(rows)}, first_row={rows[0] if rows else ''}")
 
     try:
         created = 0
@@ -662,12 +774,12 @@ def bulk_upload():
             created = _import_subjects(rows)
         elif target == "users":
             created = _import_users(rows)
-        db.session.flush()
         _log_action(f"Bulk uploaded {created} records into {target}")
         db.session.commit()
         return jsonify({"message": "Bulk upload complete", "target": target, "rows_read": len(rows), "rows_imported": created})
     except Exception as ex:
         db.session.rollback()
+        print(f"[BULK] ERROR: {ex}")
         return jsonify({"error": f"Bulk upload failed: {str(ex)}"}), 400
 
 
@@ -679,7 +791,7 @@ def bulk_template(target):
         "teachers": "name,max_lectures_per_day\nJohn Doe,5\nJane Smith,6\n",
         "rooms": "name,capacity,room_type\nA101,60,classroom\nLab-1,40,lab\n",
         "classes": "name,department,student_strength\nBSc-CS-1,Computer Science,55\nMBA-1,Management,48\n",
-        "subjects": "name,class_name,lectures_per_week,priority_morning,is_lab\nMathematics,BSc-CS-1,4,true,false\nDBMS Lab,BSc-CS-1,2,false,true\n",
+        "subjects": "name,department,lectures_per_week,priority_morning,is_lab\nMathematics,Computer Science,4,true,false\nPhysics,Computer Science,3,false,false\nComputer Lab,Computer Science,2,false,true\n",
         "users": "username,email,password,role,teacher_name,class_name\nteacher_john,john@academy.edu,secret123,teacher,John Doe,\nstudent_001,student1@academy.edu,secret123,student,,BSc-CS-1\n",
     }
     if target not in templates:
